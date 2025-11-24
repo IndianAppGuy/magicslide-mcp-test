@@ -170,6 +170,13 @@ async function fetchAccountInfo(
 function extractMainTopic(userText: string): string {
     const trimmed = userText.trim();
 
+    // For very short, simple inputs (like "artificial intelligence."), return as-is
+    // This prevents pattern matching from incorrectly extracting parts
+    if (trimmed.length < 100 && trimmed.split(/\s+/).length < 15) {
+        // Remove trailing punctuation but keep the core topic
+        return trimmed.replace(/[.,;:!?]+$/, '').trim() || trimmed;
+    }
+
     // Try to extract title from common patterns
     const titlePatterns = [
         // Pattern: "titled 'Topic'" or "title: Topic"
@@ -211,7 +218,9 @@ function extractMainTopic(userText: string): string {
         }
         return cut.trim();
     }
-    return trimmed;
+
+    // Remove trailing punctuation for cleaner topic
+    return trimmed.replace(/[.,;:!?]+$/, '').trim() || trimmed;
 }
 
 // Function to parse user text for specific parameters
@@ -285,9 +294,12 @@ async function fetchDetailsFromAPI(
 
         // Log to stderr
         console.error("API Response:", JSON.stringify(data, null, 2));
+        console.error("User Input:", userText);
 
-        // Extract main topic from user text first
+        // Extract main topic from user text first - this is our primary source
         let topic = extractMainTopic(userText);
+        const originalTopic = topic; // Keep original for validation
+        console.error("Extracted Topic:", topic);
         let slideCount = userParams.slideCount ?? 10;
         let imageForEachSlide =
             userParams.imageForEachSlide !== undefined
@@ -297,6 +309,12 @@ async function fetchDetailsFromAPI(
         let model = userParams.model ?? "gemini";
         let template = userParams.template ?? "ed-bullet-point1";
         let image_source = "google";
+
+        // NEVER override topic from API if user input is short and clear (< 200 chars)
+        // This prevents API from returning wrong topics for simple requests
+        const isShortClearInput = userText.trim().length < 200 &&
+            !userText.includes('\n') &&
+            userText.trim().split(/\s+/).length < 30;
 
         if (data.slideCount && userParams.slideCount === undefined) {
             const parsed =
@@ -318,27 +336,63 @@ async function fetchDetailsFromAPI(
         }
         if (data.image_source) image_source = data.image_source;
 
-        // Only use msSummaryText if:
-        // 1. The original text is very long (needs summarization) AND
-        // 2. msSummaryText exists and is reasonable (not empty, reasonable length)
-        // Otherwise, keep the extracted topic from user text
-        if (data.msSummaryText &&
-            userText.length > 500 &&
-            data.msSummaryText.trim().length > 10 &&
-            data.msSummaryText.trim().length < 500) {
-            // Validate that msSummaryText seems relevant (contains some keywords from original)
-            const originalLower = userText.toLowerCase();
-            const summaryLower = data.msSummaryText.toLowerCase();
-            const originalWords = originalLower.split(/\s+/).filter(w => w.length > 4);
-            const matchingWords = originalWords.filter(word => summaryLower.includes(word));
+        // Only consider API topic/summary if:
+        // 1. User input is NOT short and clear (needs summarization)
+        // 2. AND the API response seems relevant to the original input
+        if (!isShortClearInput) {
+            // Check if API returned a topic field
+            if (data.topic && typeof data.topic === "string" && data.topic.trim().length > 0) {
+                const apiTopic = data.topic.trim();
+                // Validate relevance: check if API topic contains keywords from user input
+                const userLower = userText.toLowerCase();
+                const apiTopicLower = apiTopic.toLowerCase();
+                const userKeywords = userLower.split(/\s+/).filter(w => w.length > 3);
+                const matchingKeywords = userKeywords.filter(keyword => apiTopicLower.includes(keyword));
 
-            // Only use if at least 20% of significant words match, or if original is very long
-            if (matchingWords.length > 0 &&
-                (matchingWords.length / Math.max(originalWords.length, 1) > 0.2 || userText.length > 1000)) {
-                topic = data.msSummaryText.trim();
+                // Only use API topic if it's clearly related (at least 30% keyword match)
+                if (matchingKeywords.length > 0 &&
+                    matchingKeywords.length / Math.max(userKeywords.length, 1) >= 0.3) {
+                    topic = apiTopic;
+                }
+            }
+
+            // Only use msSummaryText if:
+            // 1. The original text is very long (needs summarization) AND
+            // 2. msSummaryText exists and is reasonable (not empty, reasonable length)
+            // 3. AND it's relevant to the original input
+            if (data.msSummaryText &&
+                userText.length > 500 &&
+                data.msSummaryText.trim().length > 10 &&
+                data.msSummaryText.trim().length < 500) {
+                // Validate that msSummaryText seems relevant (contains some keywords from original)
+                const originalLower = userText.toLowerCase();
+                const summaryLower = data.msSummaryText.toLowerCase();
+                const originalWords = originalLower.split(/\s+/).filter(w => w.length > 4);
+                const matchingWords = originalWords.filter(word => summaryLower.includes(word));
+
+                // Only use if at least 30% of significant words match (increased from 20% for stricter validation)
+                if (matchingWords.length > 0 &&
+                    matchingWords.length / Math.max(originalWords.length, 1) >= 0.3) {
+                    topic = data.msSummaryText.trim();
+                }
             }
         }
 
+        // Final safety check: if topic was changed but doesn't seem related, revert to original
+        if (topic !== originalTopic) {
+            const topicLower = topic.toLowerCase();
+            const originalLower = originalTopic.toLowerCase();
+            const originalWords = originalTopic.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+            const matchingWords = originalWords.filter(word => topicLower.includes(word));
+
+            // If less than 30% of original keywords match the new topic, revert
+            if (matchingWords.length / Math.max(originalWords.length, 1) < 0.3) {
+                console.error(`Topic override rejected: "${topic}" doesn't match original "${originalTopic}"`);
+                topic = originalTopic;
+            }
+        }
+
+        console.error("Final Topic Used:", topic);
         return {
             topic,
             slideCount,
@@ -440,7 +494,7 @@ async function createPPTFromText(
 }
 
 // MCP Server Setup
-const server = new Server(
+export const server = new Server(
     { name: "magicslides-mcp", version: "1.0.0" },
     { capabilities: { tools: {} } }
 );
@@ -571,14 +625,4 @@ if (process.argv[1] === __filename) {
         console.error("Failed to start MCP server:", error);
         process.exit(1);
     });
-}
-
-// Default export for Smithery (stateless server)
-export default function ({ config }: { config?: { MAGICSLIDES_ACCESS_ID?: string } }) {
-    // Update the ACCESS_ID from config if provided
-    if (config?.MAGICSLIDES_ACCESS_ID) {
-        process.env.MAGICSLIDES_ACCESS_ID = config.MAGICSLIDES_ACCESS_ID;
-    }
-
-    return server;
 }
