@@ -1,0 +1,7 @@
+runtime: typescript
+configSchema:
+  type: object
+  properties:
+    MAGICSLIDES_ACCESS_ID:
+      type: string
+      description: MagicSlides access ID for creating presentations
