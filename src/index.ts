@@ -1,14 +1,15 @@
 // src/index.ts
-const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
-const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
-const {
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
     CallToolRequestSchema,
     ErrorCode,
     ListToolsRequestSchema,
     McpError,
-} = require("@modelcontextprotocol/sdk/types.js");
-const axios = require("axios");
-const { v4: uuidv4 } = require('uuid');
+} from "@modelcontextprotocol/sdk/types.js";
+import axios from "axios";
+import { v4 as uuidv4 } from 'uuid';
+import { fileURLToPath } from 'url';
 
 // ---------- Types for API responses ----------
 interface TranscriptResponse {
@@ -165,6 +166,54 @@ async function fetchAccountInfo(
     }
 }
 
+// Function to extract the main topic/title from user text
+function extractMainTopic(userText: string): string {
+    const trimmed = userText.trim();
+
+    // Try to extract title from common patterns
+    const titlePatterns = [
+        // Pattern: "titled 'Topic'" or "title: Topic"
+        /(?:titled|title|topic|about|on|for|regarding)[\s:]+["']?([^"'\n]+?)["']?(?:\s|$)/i,
+        // Pattern: "Topic: Impact Analysis" or "Topic - Impact Analysis"
+        /^([^:\n]+?):\s*(?:Impact|Analysis|Overview|Guide|Introduction|Future)/i,
+        /^([^:\n]+?)\s*-\s*(?:Impact|Analysis|Overview|Guide|Future)/i,
+        // Pattern: Extract text before first colon if it looks like a title
+        /^([A-Z][^:\n]{10,150}?):/,
+    ];
+
+    for (const pattern of titlePatterns) {
+        const match = trimmed.match(pattern);
+        if (match && match[1]) {
+            const extracted = match[1].trim();
+            // Only use if it's reasonable length (not too short, not too long)
+            if (extracted.length > 10 && extracted.length < 200) {
+                return extracted;
+            }
+        }
+    }
+
+    // If text starts with a quote or has a clear title in first line
+    const firstLine = trimmed.split('\n')[0].trim();
+    if (firstLine.length > 10 && firstLine.length < 200) {
+        // Check if first line looks like a title (has colon, dash, or quotes)
+        if (firstLine.includes(':') || firstLine.includes(' - ') || firstLine.match(/^["']/)) {
+            return firstLine.replace(/^["']|["']$/g, '').split(/[:\-]/)[0].trim();
+        }
+    }
+
+    // Default: return first 150 characters or original if shorter
+    if (trimmed.length > 150) {
+        // Try to cut at a word boundary
+        const cut = trimmed.substring(0, 150);
+        const lastSpace = cut.lastIndexOf(' ');
+        if (lastSpace > 100) {
+            return cut.substring(0, lastSpace).trim();
+        }
+        return cut.trim();
+    }
+    return trimmed;
+}
+
 // Function to parse user text for specific parameters
 function parseUserParameters(userText: string): {
     model?: string;
@@ -237,7 +286,8 @@ async function fetchDetailsFromAPI(
         // Log to stderr
         console.error("API Response:", JSON.stringify(data, null, 2));
 
-        let topic = userText.trim();
+        // Extract main topic from user text first
+        let topic = extractMainTopic(userText);
         let slideCount = userParams.slideCount ?? 10;
         let imageForEachSlide =
             userParams.imageForEachSlide !== undefined
@@ -267,7 +317,27 @@ async function fetchDetailsFromAPI(
             imageForEachSlide = data.imageForEachSlide;
         }
         if (data.image_source) image_source = data.image_source;
-        if (data.msSummaryText) topic = data.msSummaryText;
+
+        // Only use msSummaryText if:
+        // 1. The original text is very long (needs summarization) AND
+        // 2. msSummaryText exists and is reasonable (not empty, reasonable length)
+        // Otherwise, keep the extracted topic from user text
+        if (data.msSummaryText &&
+            userText.length > 500 &&
+            data.msSummaryText.trim().length > 10 &&
+            data.msSummaryText.trim().length < 500) {
+            // Validate that msSummaryText seems relevant (contains some keywords from original)
+            const originalLower = userText.toLowerCase();
+            const summaryLower = data.msSummaryText.toLowerCase();
+            const originalWords = originalLower.split(/\s+/).filter(w => w.length > 4);
+            const matchingWords = originalWords.filter(word => summaryLower.includes(word));
+
+            // Only use if at least 20% of significant words match, or if original is very long
+            if (matchingWords.length > 0 &&
+                (matchingWords.length / Math.max(originalWords.length, 1) > 0.2 || userText.length > 1000)) {
+                topic = data.msSummaryText.trim();
+            }
+        }
 
         return {
             topic,
@@ -281,7 +351,7 @@ async function fetchDetailsFromAPI(
     } catch (error) {
         console.error("Error fetching details from API:", error);
         return {
-            topic: userText.trim(),
+            topic: extractMainTopic(userText),
             slideCount: userParams.slideCount ?? 10,
             imageForEachSlide:
                 userParams.imageForEachSlide !== undefined
@@ -492,7 +562,8 @@ Copy and paste this URL into your browser to open your presentation in the Magic
 });
 
 // Start the server for local stdio use (when run directly)
-if (require.main === module) {
+const __filename = fileURLToPath(import.meta.url);
+if (process.argv[1] === __filename) {
     (async () => {
         const transport = new StdioServerTransport();
         await server.connect(transport);

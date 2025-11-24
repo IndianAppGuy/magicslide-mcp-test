@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "mcp-server": {
+    "magicslides-mcp": {
       "command": "node",
       "args": [
-        "/Users/pratikshakanoja/Documents/GitHub/magicslide-mcp/build/index.js"
+        "/Users/pratikshakanoja/Documents/GitHub/magicslides-next/magicslide-mcp-test/build/index.js"
       ],
       "env": {
         "MAGICSLIDES_ACCESS_ID": "3d5412ea-beea-4c35-bf29-788f2d46050b"

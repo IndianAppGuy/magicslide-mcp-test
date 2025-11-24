@@ -1,9 +1,8 @@
 {
-  "name": "magicslide-mcp",
+  "name": "magicslide-mcp-test",
   "version": "1.0.0",
   "description": "A Model Context Protocol server example",
   "private": true,
-  "type": "module",
   "module": "./src/index.ts",
   "engines": {
     "node": ">=18 <23"
